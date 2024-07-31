@@ -18,11 +18,11 @@ import random
 import string 
 from pyhocon import ConfigFactory
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
-from models.renderer import NeuSRenderer
+from neusis.models.renderer import NeuSRenderer
 import trimesh
 from itertools import groupby
 from operator import itemgetter
-from load_data import *
+from load_data import load_data
 import logging
 import argparse 
 
@@ -109,6 +109,13 @@ class Runner:
         self.sonar_resolution = (self.r_max-self.r_min)/self.H
         for i in range(self.H):
             r_increments.append(i*self.sonar_resolution + self.r_min)
+            
+            
+        ####
+        ####
+        #### INCLUDE CAMERA RESOLUTION (like above w sonar)
+        ####
+        ####
 
         self.r_increments = torch.FloatTensor(r_increments).to(self.device)
 
@@ -155,10 +162,12 @@ class Runner:
         self.sdf_network = SDFNetwork(**self.conf['model.sdf_network']).to(self.device)
 
         self.deviation_network = SingleVarianceNetwork(**self.conf['model.variance_network']).to(self.device)
-        self.color_network = RenderingNetwork(**self.conf['model.rendering_network']).to(self.device)
+        self.sonar_render_network = RenderingNetwork(**self.conf['model.rendering_network_sonar']).to(self.device)
+        self.camera_render_network = RenderingNetwork(**self.conf['model.rendering_network_camera']).to(self.device)
         params_to_train += list(self.sdf_network.parameters())
         params_to_train += list(self.deviation_network.parameters())
-        params_to_train += list(self.color_network.parameters())
+        params_to_train += list(self.sonar_render_network.parameters())
+        params_to_train += list(self.camera_render_network.parameters())
 
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
@@ -166,7 +175,8 @@ class Runner:
         self.iter_step = 0
         self.renderer = NeuSRenderer(self.sdf_network,
                                     self.deviation_network,
-                                    self.color_network,
+                                    self.sonar_render_network,
+                                    self.camera_render_network,
                                     self.base_exp_dir,
                                     self.expID,
                                     **self.conf['model.neus_renderer'])  
@@ -184,6 +194,10 @@ class Runner:
         if latest_model_name is not None:
             logging.info('Find checkpoint: {}'.format(latest_model_name))
             self.load_checkpoint(latest_model_name)
+    
+    
+    
+    
     
     def getRandomImgCoordsByPercentage(self, target):
         true_coords = []
@@ -209,6 +223,9 @@ class Runner:
         coords = torch.cat((coords, true_coords), dim=0)
             
         return coords, target
+
+
+    # TRAINING LOOP
 
     def train(self):
         loss_arr = []
@@ -257,7 +274,7 @@ class Runner:
                 if self.r_div:
                     intensity_fine = (torch.divide(intensityPointsOnArc, rs)*render_out["weights"]).sum(dim=1) 
                 else:
-                    intensity_fine = render_out['color_fine']
+                    intensity_fine = render_out['sonar_fine']
 
                 intensity_error = self.criterion(intensity_fine, target_s)*(1/n_pixels)
                     
@@ -304,12 +321,14 @@ class Runner:
                 self.validate_mesh(threshold = self.level_set)
             
 
+    # SAVING WEIGHTS
 
     def save_checkpoint(self):
         checkpoint = {
             'sdf_network_fine': self.sdf_network.state_dict(),
             'variance_network_fine': self.deviation_network.state_dict(),
-            'color_network_fine': self.color_network.state_dict(),
+            'sonar_render_network_fine': self.sonar_render_network.state_dict(),
+            'camera_render_network_fine': self.camera_render_network.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'iter_step': self.iter_step,
         }
@@ -321,7 +340,8 @@ class Runner:
         checkpoint = torch.load(os.path.join(self.base_exp_dir, 'checkpoints', checkpoint_name), map_location=self.device)
         self.sdf_network.load_state_dict(checkpoint['sdf_network_fine'])
         self.deviation_network.load_state_dict(checkpoint['variance_network_fine'])
-        self.color_network.load_state_dict(checkpoint['color_network_fine'])
+        self.sonar_render_network.load_state_dict(checkpoint['sonar_render_network_fine'])
+        self.camera_render_network.load_state_dict(checkpoint['camera_render_network_fine'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.iter_step = checkpoint['iter_step']
 
